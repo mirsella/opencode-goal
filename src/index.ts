@@ -380,6 +380,9 @@ export const GoalPlugin: Plugin = async ({ client }) => {
         const info = (event.properties as { info?: Message }).info
         if (info?.role === "assistant" && info.error?.name === "MessageAbortedError") {
           const sessionID = info.sessionID
+          const goal = getGoal(sessionID)
+          if (goal?.status !== "active") return
+
           const result = mutate(sessionID, { kind: "pause" })
           pending.delete(sessionID)
           inFlight.delete(sessionID)

@@ -74,4 +74,41 @@ describe("goal plugin e2e harness", () => {
     expect(injected?.text).toContain("create goal-smoke.txt and verify it exists")
     expect(injected?.text).not.toContain("Token budget")
   })
+
+  test("assistant aborts are ignored when the session has no goal", async () => {
+    const toasts: any[] = []
+    const warnings: unknown[][] = []
+    const originalWarn = console.warn
+    console.warn = (...args: unknown[]) => void warnings.push(args)
+
+    try {
+      const client = {
+        tui: { showToast: async (input: any) => void toasts.push(input.body) },
+        session: {
+          messages: async () => [],
+          prompt: async () => undefined,
+        },
+      }
+
+      const hooks = await GoalPlugin({ client } as any)
+      await hooks.event?.({
+        event: {
+          type: "message.updated",
+          properties: {
+            info: {
+              id: "msg-aborted",
+              sessionID: "session-without-goal",
+              role: "assistant",
+              error: { name: "MessageAbortedError" },
+            },
+          },
+        },
+      } as any)
+
+      expect(toasts).toHaveLength(0)
+      expect(warnings).toHaveLength(0)
+    } finally {
+      console.warn = originalWarn
+    }
+  })
 })
