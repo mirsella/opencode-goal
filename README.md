@@ -18,13 +18,7 @@ The plugin exposes `update_goal({ status: "complete" })` so the assistant can st
 
 ## State
 
-State is persisted per session in:
-
-```text
-${XDG_STATE_HOME:-~/.local/state}/opencode-goal/state.json
-```
-
-Only wall-clock active time is tracked. Token usage and token budgets are intentionally not tracked or mentioned.
+State is kept in memory per session and is reset when the OpenCode process restarts. Only wall-clock active time is tracked. Token usage and token budgets are intentionally not tracked or mentioned.
 
 ## Local Install
 

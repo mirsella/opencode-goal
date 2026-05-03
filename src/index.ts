@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto"
 import { tool, type Plugin } from "@opencode-ai/plugin"
 import type { Message, Part, TextPart } from "@opencode-ai/sdk"
-import { accounted, GoalStore, type GoalState, type GoalStatus } from "./state"
 
 const HANDLED = "__GOAL_HANDLED__"
 const TRIGGER_TEXT = "Continue working toward the active goal."
@@ -10,9 +9,11 @@ const START_DEBOUNCE_MS = 750
 
 type Model = { providerID: string; modelID: string }
 type Info = { agent: string; model?: Model; variant?: string; controls?: string[]; fast?: boolean }
+export type GoalStatus = "active" | "paused" | "complete"
+export type GoalState = { objective: string; status: GoalStatus; createdAt: number; updatedAt: number; activeStartedAt: number | null; timeUsedSeconds: number }
 type SessionMessage = { info: Message & Record<string, unknown>; parts: Part[] }
 type PendingContinuation = { sessionID: string; startedAt: number; messageID?: string }
-type MutatingCommand = Exclude<ReturnType<typeof parseGoalCommand>, { kind: "show" }> | { kind: "complete" | "pending" | "clear-pending" }
+type MutatingCommand = Exclude<ReturnType<typeof parseGoalCommand>, { kind: "show" }> | { kind: "complete" }
 type Result = { ok: boolean; message: string; goal?: GoalState }
 
 const z = tool.schema
@@ -73,6 +74,12 @@ export const escapeXml = (value: string) => value.replaceAll("&", "&amp;").repla
 
 export const renderContinuationPrompt = ({ objective, timeUsedSeconds }: { objective: string; timeUsedSeconds: number }) =>
   `${PROMPT.replace("{{ objective }}", escapeXml(objective))}\n\nTime used pursuing goal: ${formatElapsed(timeUsedSeconds)}.`
+
+export function accounted(goal: GoalState, now = Date.now()): GoalState {
+  if (goal.status !== "active" || goal.activeStartedAt === null) return { ...goal }
+  const elapsed = Math.max(0, Math.floor((now - goal.activeStartedAt) / 1000))
+  return { ...goal, activeStartedAt: now, timeUsedSeconds: goal.timeUsedSeconds + elapsed, updatedAt: now }
+}
 
 const stableID = (prefix: string, seed: string) => `${prefix}_${createHash("sha256").update(seed).digest("hex").slice(0, 16)}`
 
@@ -173,10 +180,8 @@ function commandResult(message: string, goal?: GoalState) {
   return goal ? `${message}\n\n${formatGoalSummary(goal)}` : message
 }
 
-const clearFlag = (goal: GoalState): GoalState => ({ ...goal, pendingContinuation: false, updatedAt: Date.now() })
-
 export const GoalPlugin: Plugin = async ({ client }) => {
-  const store = new GoalStore()
+  const goals = new Map<string, GoalState>()
   const hidden = new Set<string>()
   const inFlight = new Set<string>()
   const pending = new Map<string, PendingContinuation>()
@@ -191,48 +196,49 @@ export const GoalPlugin: Plugin = async ({ client }) => {
     throw new Error(HANDLED)
   }
 
-  const mutate = (sessionID: string, op: MutatingCommand, now = Date.now()) =>
-    store.update<Result>(sessionID, (goal) => {
-      const fail = (message: string) => ({ result: { ok: false, message } })
-      const next = (message: string, goal: GoalState | null) => ({ goal, result: { ok: true, message, ...(goal ? { goal } : {}) } })
+  const getGoal = (sessionID: string) => goals.get(sessionID)
+  const putGoal = (sessionID: string, goal: GoalState | null) => (goal ? goals.set(sessionID, goal) : goals.delete(sessionID))
 
-      if (op.kind === "set") {
-        if (!op.objective.trim()) {
-          console.warn("GoalPlugin refused to set an empty objective", { sessionID })
-          return fail("Usage: /goal <objective>")
-        }
-        return next("Goal active", { objective: op.objective.trim(), status: "active", createdAt: now, updatedAt: now, activeStartedAt: now, timeUsedSeconds: 0 })
-      }
+  const mutate = (sessionID: string, op: MutatingCommand, now = Date.now()): Result => {
+    const goal = getGoal(sessionID)
+    const fail = (message: string) => ({ ok: false, message })
+    const next = (message: string, goal: GoalState | null): Result => {
+      putGoal(sessionID, goal)
+      return goal ? { ok: true, message, goal } : { ok: true, message }
+    }
 
-      if (!goal) {
-        const messages = { clear: "No goal to clear", pause: "No goal to pause", resume: "No goal to resume", complete: "No active goal to complete", pending: "No goal is currently set.", "clear-pending": "No goal is currently set." }
-        console.warn(`GoalPlugin cannot ${op.kind} a missing goal`, { sessionID })
-        return fail(messages[op.kind as keyof typeof messages])
+    if (op.kind === "set") {
+      if (!op.objective.trim()) {
+        console.warn("GoalPlugin refused to set an empty objective", { sessionID })
+        return fail("Usage: /goal <objective>")
       }
+      return next("Goal active", { objective: op.objective.trim(), status: "active", createdAt: now, updatedAt: now, activeStartedAt: now, timeUsedSeconds: 0 })
+    }
 
-      if (op.kind === "clear") return next("Goal cleared", null)
-      if (op.kind === "clear-pending") return next("Goal continuation cleared", clearFlag(goal))
-      if (op.kind === "pending") {
-        if (goal.status !== "active" || goal.pendingContinuation) return fail(goal.pendingContinuation ? "Goal continuation already pending" : `Goal is ${goal.status}`)
-        return next("Goal continuation pending", { ...accounted(goal, now), pendingContinuation: true, updatedAt: now })
+    if (!goal) {
+      const messages = { clear: "No goal to clear", pause: "No goal to pause", resume: "No goal to resume", complete: "No active goal to complete" }
+      console.warn(`GoalPlugin cannot ${op.kind} a missing goal`, { sessionID })
+      return fail(messages[op.kind as keyof typeof messages])
+    }
+
+    if (op.kind === "clear") return next("Goal cleared", null)
+    if (op.kind === "pause") {
+      if (goal.status !== "active") {
+        console.warn("GoalPlugin cannot pause a non-active goal", { sessionID, status: goal.status })
+        return fail(`Goal is ${goal.status}`)
       }
-      if (op.kind === "pause") {
-        if (goal.status !== "active") {
-          console.warn("GoalPlugin cannot pause a non-active goal", { sessionID, status: goal.status })
-          return fail(`Goal is ${goal.status}`)
-        }
-        return next("Goal paused", { ...accounted(goal, now), status: "paused", activeStartedAt: null, pendingContinuation: false, updatedAt: now })
+      return next("Goal paused", { ...accounted(goal, now), status: "paused", activeStartedAt: null, updatedAt: now })
+    }
+    if (op.kind === "resume") {
+      if (goal.status !== "paused") {
+        console.warn("GoalPlugin cannot resume a non-paused goal", { sessionID, status: goal.status })
+        return fail(`Goal is ${goal.status}`)
       }
-      if (op.kind === "resume") {
-        if (goal.status !== "paused") {
-          console.warn("GoalPlugin cannot resume a non-paused goal", { sessionID, status: goal.status })
-          return fail(`Goal is ${goal.status}`)
-        }
-        return next("Goal active", { ...goal, status: "active", activeStartedAt: now, pendingContinuation: false, updatedAt: now })
-      }
-      if (goal.status === "complete") return next("Goal already complete", goal)
-      return next("Goal complete", { ...accounted(goal, now), status: "complete", activeStartedAt: null, pendingContinuation: false, updatedAt: now })
-    })
+      return next("Goal active", { ...goal, status: "active", activeStartedAt: now, updatedAt: now })
+    }
+    if (goal.status === "complete") return next("Goal already complete", goal)
+    return next("Goal complete", { ...accounted(goal, now), status: "complete", activeStartedAt: null, updatedAt: now })
+  }
 
   const latest = async (sessionID: string): Promise<Info | undefined> => {
     const result = await client.session.messages({ path: { id: sessionID }, query: { limit: 100 } }).catch((error) => {
@@ -262,9 +268,8 @@ export const GoalPlugin: Plugin = async ({ client }) => {
     })[0]
   }
 
-  const clearContinuation = async (sessionID: string) => {
+  const clearContinuation = (sessionID: string) => {
     pending.delete(sessionID)
-    await mutate(sessionID, { kind: "clear-pending" })
   }
 
   const startContinuation = async (sessionID: string, options?: { ignoreDebounce?: boolean }) => {
@@ -272,12 +277,13 @@ export const GoalPlugin: Plugin = async ({ client }) => {
     if (pending.has(sessionID)) return
     if (!options?.ignoreDebounce && now - (lastStarted.get(sessionID) ?? 0) < START_DEBOUNCE_MS) return
 
-    const marked = await mutate(sessionID, { kind: "pending" }, now)
-    if (!marked.ok || !marked.goal) return
+    const goal = getGoal(sessionID)
+    if (!goal || goal.status !== "active") return
+    putGoal(sessionID, accounted(goal, now))
 
     const info = await latest(sessionID)
     if (planLike(info)) {
-      await clearContinuation(sessionID)
+      clearContinuation(sessionID)
       await toast("Goal continuation skipped in plan mode")
       return
     }
@@ -309,18 +315,16 @@ export const GoalPlugin: Plugin = async ({ client }) => {
       console.error("GoalPlugin failed to start goal continuation", error)
       pending.delete(sessionID)
       inFlight.delete(sessionID)
-      await mutate(sessionID, { kind: "clear-pending" })
       await toast(`Goal continuation failed: ${error instanceof Error ? error.message : String(error)}`, "error")
     })
   }
 
   const injectContinuation = async (messages: SessionMessage[], continuation: PendingContinuation, injectedMessages: Set<string>) => {
-    const goal = await store.get(continuation.sessionID)
+    const goal = getGoal(continuation.sessionID)
     if (!goal || goal.status !== "active") {
       console.warn("GoalPlugin skipped continuation injection because no active goal exists", { sessionID: continuation.sessionID })
       pending.delete(continuation.sessionID)
       inFlight.delete(continuation.sessionID)
-      await mutate(continuation.sessionID, { kind: "clear-pending" })
       return
     }
 
@@ -333,7 +337,6 @@ export const GoalPlugin: Plugin = async ({ client }) => {
       replaceTriggerWithPrompt(trigger, rendered, seed)
       injectedMessages.add(messageIDOf(trigger))
       pending.delete(continuation.sessionID)
-      await mutate(continuation.sessionID, { kind: "clear-pending" })
       return
     }
 
@@ -341,14 +344,12 @@ export const GoalPlugin: Plugin = async ({ client }) => {
     if (anchor) {
       appendToLastTextPart(anchor, rendered, seed)
       pending.delete(continuation.sessionID)
-      await mutate(continuation.sessionID, { kind: "clear-pending" })
       return
     }
 
     console.warn("GoalPlugin skipped continuation because no safe message anchor was found", { sessionID: continuation.sessionID })
     pending.delete(continuation.sessionID)
     inFlight.delete(continuation.sessionID)
-    await mutate(continuation.sessionID, { kind: "clear-pending" })
   }
 
   return {
@@ -364,7 +365,7 @@ export const GoalPlugin: Plugin = async ({ client }) => {
           status: z.literal("complete"),
         },
         execute: async (_args, context) => {
-          const result = await mutate(context.sessionID, { kind: "complete" })
+          const result = mutate(context.sessionID, { kind: "complete" })
           pending.delete(context.sessionID)
           inFlight.delete(context.sessionID)
 
@@ -379,7 +380,7 @@ export const GoalPlugin: Plugin = async ({ client }) => {
         const info = (event.properties as { info?: Message }).info
         if (info?.role === "assistant" && info.error?.name === "MessageAbortedError") {
           const sessionID = info.sessionID
-          const result = await mutate(sessionID, { kind: "pause" })
+          const result = mutate(sessionID, { kind: "pause" })
           pending.delete(sessionID)
           inFlight.delete(sessionID)
           if (result.ok) await toast(commandResult("Goal paused after interrupt", result.goal))
@@ -403,7 +404,7 @@ export const GoalPlugin: Plugin = async ({ client }) => {
       if (pending.has(sessionID)) return
       const wasInFlight = inFlight.delete(sessionID)
 
-      const goal = await store.get(sessionID)
+      const goal = getGoal(sessionID)
       if (!goal || goal.status !== "active") return
 
       await startContinuation(sessionID, { ignoreDebounce: wasInFlight })
@@ -416,19 +417,14 @@ export const GoalPlugin: Plugin = async ({ client }) => {
       const op = parseGoalCommand(input.arguments ?? "")
 
       if (op.kind === "show") {
-        const goal = await store.get(sessionID)
+        const goal = getGoal(sessionID)
         return stop(goal ? formatGoalSummary(goal) : NO_GOAL)
       }
 
-      const result = await mutate(sessionID, op)
-      if (op.kind === "set" || op.kind === "resume") {
-        pending.delete(sessionID)
-        inFlight.delete(sessionID)
-        if (result.ok) await startContinuation(sessionID, { ignoreDebounce: true })
-      } else {
-        pending.delete(sessionID)
-        inFlight.delete(sessionID)
-      }
+      const result = mutate(sessionID, op)
+      pending.delete(sessionID)
+      inFlight.delete(sessionID)
+      if (result.ok && (op.kind === "set" || op.kind === "resume")) await startContinuation(sessionID, { ignoreDebounce: true })
       return stop(result.ok && result.goal ? commandResult(result.message, result.goal) : result.ok ? result.message : op.kind === "clear" ? `${result.message}\n${NO_GOAL}` : result.message, result.ok ? "info" : "error")
     },
 

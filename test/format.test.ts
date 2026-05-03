@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { commandHints, formatElapsed, formatGoalSummary } from "../src/index"
-import type { GoalState } from "../src/state"
+import { accounted, commandHints, formatElapsed, formatGoalSummary } from "../src/index"
+import type { GoalState } from "../src/index"
 
 describe("formatElapsed", () => {
   test.each([
@@ -36,5 +36,12 @@ describe("goal summary", () => {
     expect(commandHints("active")).toBe("Commands: /goal pause, /goal clear")
     expect(commandHints("paused")).toBe("Commands: /goal resume, /goal clear")
     expect(commandHints("complete")).toBe("Commands: /goal clear")
+  })
+})
+
+describe("accounted", () => {
+  test("adds active elapsed time", () => {
+    const goal: GoalState = { objective: "ship it", status: "active", createdAt: 1_000, updatedAt: 1_000, activeStartedAt: 1_000, timeUsedSeconds: 10 }
+    expect(accounted(goal, 61_000)).toMatchObject({ activeStartedAt: 61_000, timeUsedSeconds: 70, updatedAt: 61_000 })
   })
 })

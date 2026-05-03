@@ -1,23 +1,8 @@
-import { mkdtemp, rm } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
-import { afterEach, describe, expect, test } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import GoalPlugin from "../src/index"
-
-const dirs: string[] = []
-const oldStateHome = process.env.XDG_STATE_HOME
-
-afterEach(async () => {
-  process.env.XDG_STATE_HOME = oldStateHome
-  await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })))
-})
 
 describe("goal plugin e2e harness", () => {
   test("/goal <objective> starts a fresh-session continuation and injects the prompt", async () => {
-    const stateHome = await mkdtemp(join(tmpdir(), "opencode-goal-e2e-"))
-    dirs.push(stateHome)
-    process.env.XDG_STATE_HOME = stateHome
-
     const prompts: any[] = []
     const toasts: any[] = []
     const client = {
