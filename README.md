@@ -1,5 +1,10 @@
 # opencode-goal
 
+[![npm version](https://img.shields.io/npm/v/opencode-goal?color=cb3837)](https://www.npmjs.com/package/opencode-goal)
+[![CI](https://github.com/mirsella/opencode-goal/actions/workflows/ci.yml/badge.svg)](https://github.com/mirsella/opencode-goal/actions/workflows/ci.yml)
+[![npm downloads](https://img.shields.io/npm/dm/opencode-goal)](https://www.npmjs.com/package/opencode-goal)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 OpenCode server plugin that adds Codex-style `/goal` behavior for long-running tasks.
 
 ## Commands
@@ -20,17 +25,17 @@ The plugin exposes `update_goal({ status: "complete" })` so the assistant can st
 
 State is kept in memory per session and is reset when the OpenCode process restarts. Only wall-clock active time is tracked. Token usage and token budgets are intentionally not tracked or mentioned.
 
-## Local Install
+## Install
 
-Add the source plugin path to OpenCode config:
+Add the npm plugin to your OpenCode config:
 
 ```jsonc
 "plugin": [
-  "/home/mirsella/dev/opencode-goal/src/index.ts",
+  "opencode-goal",
 ]
 ```
 
-Then restart OpenCode so it reloads the plugin.
+Restart OpenCode after installing. OpenCode installs npm plugins automatically at startup.
 
 ## Checks
 

@@ -2,10 +2,33 @@
   "name": "opencode-goal",
   "version": "0.1.0",
   "type": "module",
-  "private": true,
+  "description": "Add Codex-style long-running goals to OpenCode",
   "main": "./src/index.ts",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "plugin",
+    "goal"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mirsella/opencode-goal.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mirsella/opencode-goal/issues"
+  },
+  "homepage": "https://github.com/mirsella/opencode-goal#readme",
+  "license": "MIT",
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
   "exports": {
     ".": "./src/index.ts"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "test": "bun test",
