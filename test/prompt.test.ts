@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { escapeXml, renderContinuationPrompt } from "../src/index"
+import { escapeXml, renderContinuationPrompt } from "../src/core"
 
 describe("escapeXml", () => {
   test("escapes XML-sensitive characters", () => {
@@ -16,5 +16,15 @@ describe("renderContinuationPrompt", () => {
     expect(prompt).toContain("Time used pursuing goal: 1m.")
     expect(prompt).not.toContain("Tokens")
     expect(prompt).not.toContain("budget")
+    expect(prompt).not.toContain("Stagnation recovery")
+  })
+
+  test("adds recovery instructions when requested", () => {
+    const prompt = renderContinuationPrompt({ objective: "finish audit", timeUsedSeconds: 0, mode: "recovery" })
+
+    expect(prompt).toContain("Stagnation recovery:")
+    expect(prompt).toContain("compact the relevant working state")
+    expect(prompt).toContain("immediately execute the first action using tools")
+    expect(prompt).toContain("Do not repeat the same status summary")
   })
 })

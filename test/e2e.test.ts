@@ -2,6 +2,10 @@ import { describe, expect, test } from "bun:test"
 import GoalPlugin from "../src/index"
 
 describe("goal plugin e2e harness", () => {
+  test("package entrypoint only exports plugin functions", async () => {
+    expect(Object.keys(await import("../src/index"))).toEqual(["GoalPlugin", "default"])
+  })
+
   test("/goal <objective> starts a fresh-session continuation and injects the prompt", async () => {
     const prompts: any[] = []
     const toasts: any[] = []
@@ -110,5 +114,54 @@ describe("goal plugin e2e harness", () => {
     } finally {
       console.warn = originalWarn
     }
+  })
+
+  test("uses a recovery prompt before pausing repeated stop-only continuations", async () => {
+    const prompts: any[] = []
+    const toasts: any[] = []
+    const client = {
+      tui: { showToast: async (input: any) => void toasts.push(input.body) },
+      session: {
+        messages: async () => [],
+        prompt: async (input: any) => void prompts.push(input),
+      },
+    }
+
+    const hooks = await GoalPlugin({ client } as any)
+    const injectPending = async (id: string) => {
+      const trigger = {
+        message: { id },
+        parts: [{ id: `${id}-part`, sessionID: "session-loop", messageID: id, type: "text", text: "Continue working toward the active goal.", synthetic: true, ignored: true }],
+      }
+      await hooks["chat.message"]?.({ sessionID: "session-loop" }, trigger as any)
+      const output = { messages: [{ info: { id, sessionID: "session-loop", role: "user", agent: "build", time: { created: Date.now() } }, parts: trigger.parts }] }
+      await hooks["experimental.chat.messages.transform"]?.(
+        {},
+        output as any,
+      )
+      return output.messages[0]?.parts[0]?.text ?? ""
+    }
+
+    await expect(hooks["command.execute.before"]?.({ command: "goal", sessionID: "session-loop", arguments: "keep improving until complete" }, { parts: [] })).rejects.toThrow(
+      "__GOAL_HANDLED__",
+    )
+    expect(prompts).toHaveLength(1)
+    expect(await injectPending("msg-loop-1")).not.toContain("Stagnation recovery")
+
+    await hooks.event?.({ event: { type: "message.updated", properties: { info: { sessionID: "session-loop", role: "assistant", finish: "stop" } } } } as any)
+    await hooks.event?.({ event: { type: "session.status", properties: { sessionID: "session-loop", status: { type: "idle" } } } } as any)
+    expect(prompts).toHaveLength(2)
+    expect(await injectPending("msg-loop-2")).not.toContain("Stagnation recovery")
+
+    await hooks.event?.({ event: { type: "message.updated", properties: { info: { sessionID: "session-loop", role: "assistant", finish: "stop" } } } } as any)
+    await hooks.event?.({ event: { type: "session.status", properties: { sessionID: "session-loop", status: { type: "idle" } } } } as any)
+    expect(prompts).toHaveLength(3)
+    expect(await injectPending("msg-loop-3")).toContain("Stagnation recovery")
+
+    await hooks.event?.({ event: { type: "message.updated", properties: { info: { sessionID: "session-loop", role: "assistant", finish: "stop" } } } } as any)
+    await hooks.event?.({ event: { type: "session.status", properties: { sessionID: "session-loop", status: { type: "idle" } } } } as any)
+    expect(prompts).toHaveLength(3)
+    expect(toasts.at(-1)?.message).toContain("Goal paused because recovery continuation stopped without taking action")
+    expect(toasts.at(-1)?.variant).toBe("error")
   })
 })

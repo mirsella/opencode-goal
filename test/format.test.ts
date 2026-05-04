@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { accounted, commandHints, formatElapsed, formatGoalSummary } from "../src/index"
-import type { GoalState } from "../src/index"
+import { accounted, commandHints, formatElapsed, formatGoalSummary } from "../src/core"
+import type { GoalState } from "../src/core"
 
 describe("formatElapsed", () => {
   test.each([

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { parseGoalCommand } from "../src/index"
+import { parseGoalCommand } from "../src/core"
 
 describe("parseGoalCommand", () => {
   test("parses empty input as show", () => {
