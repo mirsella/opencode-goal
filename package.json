@@ -35,14 +35,14 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "1.4.6",
-    "@opencode-ai/sdk": "1.3.15"
+    "@opencode-ai/plugin": "1.14.37",
+    "@opencode-ai/sdk": "1.14.37"
   },
   "overrides": {
     "uuid": "14.0.0"
   },
   "devDependencies": {
-    "@types/bun": "^1.3.0",
-    "typescript": "^5.9.3"
+    "@types/bun": "^1.3.13",
+    "typescript": "^6.0.3"
   }
 }
