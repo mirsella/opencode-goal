@@ -23,7 +23,7 @@ The plugin exposes `update_goal({ status: "complete" })` so the assistant can st
 
 ## State
 
-State is kept in memory per session and is reset when the OpenCode process restarts. Only wall-clock active time is tracked. Token usage and token budgets are intentionally not tracked or mentioned.
+Goal state is saved to disk per session and restored when the OpenCode process restarts. By default it is stored under `$XDG_STATE_HOME/opencode-goal` or `~/.local/state/opencode-goal`; set `OPENCODE_GOAL_STATE_FILE` to override the state file path. Only wall-clock active time is tracked. Token usage and token budgets are intentionally not tracked or mentioned.
 
 ## Install
 

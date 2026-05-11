@@ -1,5 +1,29 @@
-import { describe, expect, test } from "bun:test"
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import GoalPlugin from "../src/index"
+
+let previousStateFile: string | undefined
+let stateDir: string | undefined
+let stateFile = ""
+
+beforeEach(async () => {
+  previousStateFile = process.env.OPENCODE_GOAL_STATE_FILE
+  stateDir = await mkdtemp(join(tmpdir(), "opencode-goal-"))
+  stateFile = join(stateDir, "sessions.json")
+  process.env.OPENCODE_GOAL_STATE_FILE = stateFile
+})
+
+afterEach(async () => {
+  if (previousStateFile === undefined) delete process.env.OPENCODE_GOAL_STATE_FILE
+  else process.env.OPENCODE_GOAL_STATE_FILE = previousStateFile
+
+  if (stateDir) await rm(stateDir, { recursive: true, force: true })
+  previousStateFile = undefined
+  stateDir = undefined
+  stateFile = ""
+})
 
 describe("goal plugin e2e harness", () => {
   test("package entrypoint only exports plugin functions", async () => {
@@ -163,5 +187,43 @@ describe("goal plugin e2e harness", () => {
     expect(prompts).toHaveLength(3)
     expect(toasts.at(-1)?.message).toContain("Goal paused because recovery continuation stopped without taking action")
     expect(toasts.at(-1)?.variant).toBe("error")
+  })
+
+  test("persists goals per session and restores them after plugin restart", async () => {
+    const firstClient = {
+      tui: { showToast: async () => undefined },
+      session: {
+        messages: async () => [],
+        prompt: async () => undefined,
+      },
+    }
+
+    const firstHooks = await GoalPlugin({ client: firstClient } as any)
+    await expect(firstHooks["command.execute.before"]?.({ command: "goal", sessionID: "persisted-session", arguments: "survive restarts" }, { parts: [] })).rejects.toThrow(
+      "__GOAL_HANDLED__",
+    )
+
+    const saved = JSON.parse(await readFile(stateFile, "utf8"))
+    expect(saved["persisted-session"]).toMatchObject({ objective: "survive restarts", status: "active" })
+    saved["persisted-session"].activeStartedAt = Date.now() - 3_600_000
+    await writeFile(stateFile, `${JSON.stringify(saved)}\n`, "utf8")
+
+    const toasts: any[] = []
+    const secondClient = {
+      tui: { showToast: async (input: any) => void toasts.push(input.body) },
+      session: {
+        messages: async () => [],
+        prompt: async () => undefined,
+      },
+    }
+
+    const secondHooks = await GoalPlugin({ client: secondClient } as any)
+    await expect(secondHooks["command.execute.before"]?.({ command: "goal", sessionID: "persisted-session", arguments: "" }, { parts: [] })).rejects.toThrow(
+      "__GOAL_HANDLED__",
+    )
+
+    expect(toasts.at(-1)?.message).toContain("Status: active")
+    expect(toasts.at(-1)?.message).toContain("Objective: survive restarts")
+    expect(toasts.at(-1)?.message).toContain("Time used: 0s")
   })
 })

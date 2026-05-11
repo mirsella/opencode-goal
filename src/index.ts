@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto"
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
+import { homedir } from "node:os"
+import { dirname, join } from "node:path"
 import { tool, type Plugin } from "@opencode-ai/plugin"
 import type { Message, Part, TextPart } from "@opencode-ai/sdk"
 import { NO_GOAL, accounted, commandHints, formatElapsed, formatGoalSummary, parseGoalCommand, renderContinuationPrompt, type ContinuationMode, type GoalState } from "./core"
@@ -9,6 +12,7 @@ const TRIGGER_METADATA = "opencode-goal-continuation-trigger"
 const START_DEBOUNCE_MS = 750
 const RECOVERY_STAGNANT_CONTINUATIONS = 2
 const MAX_STAGNANT_CONTINUATIONS = 3
+const STATE_FILE_ENV = "OPENCODE_GOAL_STATE_FILE"
 
 type Model = { providerID: string; modelID: string }
 type Info = { agent: string; model?: Model; variant?: string; controls?: string[]; fast?: boolean }
@@ -20,6 +24,74 @@ type Result = { ok: boolean; message: string; goal?: GoalState }
 const z = tool.schema
 
 const stableID = (prefix: string, seed: string) => `${prefix}_${createHash("sha256").update(seed).digest("hex").slice(0, 16)}`
+
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value)
+
+const isGoalStatus = (value: unknown): value is GoalState["status"] => value === "active" || value === "paused" || value === "complete"
+
+const isNonNegativeNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0
+
+function parseGoalState(sessionID: string, value: unknown): GoalState | undefined {
+  const invalid = (reason: string) => {
+    console.warn(`GoalPlugin skipped invalid persisted goal: ${reason}`, { sessionID })
+    return undefined
+  }
+
+  if (!isRecord(value)) return invalid("not an object")
+
+  const { objective, status, createdAt, updatedAt, activeStartedAt, timeUsedSeconds } = value
+  if (typeof objective !== "string" || !objective.trim()) return invalid("objective is empty or malformed")
+  if (!isGoalStatus(status)) return invalid("status is malformed")
+  if (!isNonNegativeNumber(createdAt) || !isNonNegativeNumber(updatedAt) || !isNonNegativeNumber(timeUsedSeconds)) return invalid("timestamps or elapsed time are malformed")
+  if (activeStartedAt !== null && !isNonNegativeNumber(activeStartedAt)) return invalid("activeStartedAt is malformed")
+  if (status === "active" && activeStartedAt === null) return invalid("active goal has no activeStartedAt")
+  if (status !== "active" && activeStartedAt !== null) return invalid("inactive goal has activeStartedAt")
+
+  return { objective, status, createdAt, updatedAt, activeStartedAt, timeUsedSeconds }
+}
+
+async function loadGoals(stateFile: string, now = Date.now()): Promise<Map<string, GoalState>> {
+  let raw: string
+  try {
+    raw = await readFile(stateFile, "utf8")
+  } catch (error) {
+    if ((error as { code?: string }).code !== "ENOENT") console.warn("GoalPlugin could not read persisted goal state", { stateFile, error })
+    return new Map()
+  }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch (error) {
+    console.warn("GoalPlugin ignored corrupt persisted goal state", { stateFile, error })
+    return new Map()
+  }
+
+  if (!isRecord(parsed)) {
+    console.warn("GoalPlugin ignored unsupported persisted goal state", { stateFile })
+    return new Map()
+  }
+
+  const goals = new Map<string, GoalState>()
+  for (const [sessionID, value] of Object.entries(parsed)) {
+    const goal = parseGoalState(sessionID, value)
+    if (goal) goals.set(sessionID, goal.status === "active" ? { ...goal, activeStartedAt: now } : goal)
+  }
+  return goals
+}
+
+async function saveGoals(stateFile: string, goals: Map<string, GoalState>): Promise<void> {
+  const state = Object.fromEntries([...goals.entries()].sort(([a], [b]) => a.localeCompare(b)))
+  await mkdir(dirname(stateFile), { recursive: true })
+  const tmp = `${stateFile}.${process.pid}.${Date.now()}.tmp`
+  await writeFile(tmp, `${JSON.stringify(state, null, 2)}\n`, "utf8")
+  await rename(tmp, stateFile)
+}
+
+function defaultStateFile(scope: string): string {
+  const root = process.env.XDG_STATE_HOME || join(homedir(), ".local", "state")
+  return join(root, "opencode-goal", stableID("scope", scope), "sessions.json")
+}
 
 const isTextPart = (part: Part): part is TextPart => part.type === "text"
 
@@ -118,8 +190,9 @@ function commandResult(message: string, goal?: GoalState) {
   return goal ? `${message}\n\n${formatGoalSummary(goal)}` : message
 }
 
-export const GoalPlugin: Plugin = async ({ client }) => {
-  const goals = new Map<string, GoalState>()
+export const GoalPlugin: Plugin = async ({ client, directory, worktree }) => {
+  const stateFile = process.env[STATE_FILE_ENV] || defaultStateFile(String(worktree ?? directory ?? process.cwd()))
+  const goals = await loadGoals(stateFile)
   const hidden = new Set<string>()
   const inFlight = new Set<string>()
   const pending = new Map<string, PendingContinuation>()
@@ -139,11 +212,24 @@ export const GoalPlugin: Plugin = async ({ client }) => {
   const getGoal = (sessionID: string) => goals.get(sessionID)
   const putGoal = (sessionID: string, goal: GoalState | null) => (goal ? goals.set(sessionID, goal) : goals.delete(sessionID))
 
-  const mutate = (sessionID: string, op: MutatingCommand, now = Date.now()): Result => {
+  let persistQueue = Promise.resolve()
+  const persistGoals = async () => {
+    const snapshot = new Map(goals)
+    persistQueue = persistQueue.catch(() => undefined).then(() => saveGoals(stateFile, snapshot))
+    try {
+      await persistQueue
+    } catch (error) {
+      console.error("GoalPlugin failed to persist goal state", { stateFile, error })
+      await toast(`Goal state could not be saved: ${error instanceof Error ? error.message : String(error)}`, "error", 8000)
+    }
+  }
+
+  const mutate = async (sessionID: string, op: MutatingCommand, now = Date.now()): Promise<Result> => {
     const goal = getGoal(sessionID)
     const fail = (message: string) => ({ ok: false, message })
-    const next = (message: string, goal: GoalState | null): Result => {
+    const next = async (message: string, goal: GoalState | null): Promise<Result> => {
       putGoal(sessionID, goal)
+      await persistGoals()
       return goal ? { ok: true, message, goal } : { ok: true, message }
     }
 
@@ -208,10 +294,6 @@ export const GoalPlugin: Plugin = async ({ client }) => {
     })[0]
   }
 
-  const clearContinuation = (sessionID: string) => {
-    pending.delete(sessionID)
-  }
-
   const startContinuation = async (sessionID: string, options?: { ignoreDebounce?: boolean; mode?: ContinuationMode }) => {
     const now = Date.now()
     if (pending.has(sessionID)) return
@@ -220,10 +302,11 @@ export const GoalPlugin: Plugin = async ({ client }) => {
     const goal = getGoal(sessionID)
     if (!goal || goal.status !== "active") return
     putGoal(sessionID, accounted(goal, now))
+    await persistGoals()
 
     const info = await latest(sessionID)
     if (planLike(info)) {
-      clearContinuation(sessionID)
+      pending.delete(sessionID)
       await toast("Goal continuation skipped in plan mode")
       return
     }
@@ -305,7 +388,7 @@ export const GoalPlugin: Plugin = async ({ client }) => {
           status: z.literal("complete"),
         },
         execute: async (_args, context) => {
-          const result = mutate(context.sessionID, { kind: "complete" })
+          const result = await mutate(context.sessionID, { kind: "complete" })
           pending.delete(context.sessionID)
           inFlight.delete(context.sessionID)
           stagnantStops.delete(context.sessionID)
@@ -329,10 +412,12 @@ export const GoalPlugin: Plugin = async ({ client }) => {
           const goal = getGoal(sessionID)
           if (goal?.status !== "active") return
 
-          const result = mutate(sessionID, { kind: "pause" })
+          const result = await mutate(sessionID, { kind: "pause" })
           pending.delete(sessionID)
           inFlight.delete(sessionID)
-          if (result.ok) await toast(commandResult("Goal paused after interrupt", result.goal))
+          if (result.ok) {
+            await toast(commandResult("Goal paused after interrupt", result.goal))
+          }
         }
         return
       }
@@ -360,10 +445,12 @@ export const GoalPlugin: Plugin = async ({ client }) => {
         const stops = (stagnantStops.get(sessionID) ?? 0) + 1
         stagnantStops.set(sessionID, stops)
         if (stops >= MAX_STAGNANT_CONTINUATIONS) {
-          const result = mutate(sessionID, { kind: "pause" })
+          const result = await mutate(sessionID, { kind: "pause" })
           pending.delete(sessionID)
           inFlight.delete(sessionID)
-          if (result.ok) await toast(commandResult("Goal paused because recovery continuation stopped without taking action", result.goal), "error", 8000)
+          if (result.ok) {
+            await toast(commandResult("Goal paused because recovery continuation stopped without taking action", result.goal), "error", 8000)
+          }
           return
         }
       }
@@ -382,7 +469,7 @@ export const GoalPlugin: Plugin = async ({ client }) => {
         return stop(goal ? formatGoalSummary(goal) : NO_GOAL)
       }
 
-      const result = mutate(sessionID, op)
+      const result = await mutate(sessionID, op)
       pending.delete(sessionID)
       inFlight.delete(sessionID)
       stagnantStops.delete(sessionID)
