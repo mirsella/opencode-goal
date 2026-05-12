@@ -15,4 +15,10 @@ describe("parseGoalCommand", () => {
   test("preserves objective text", () => {
     expect(parseGoalCommand(" improve benchmark coverage ")).toEqual({ kind: "set", objective: "improve benchmark coverage" })
   })
+
+  test("parses append commands", () => {
+    expect(parseGoalCommand("append document the edge case")).toEqual({ kind: "append", objective: "document the edge case" })
+    expect(parseGoalCommand(" APPEND   keep the stats ")).toEqual({ kind: "append", objective: "keep the stats" })
+    expect(parseGoalCommand("append")).toEqual({ kind: "append", objective: "" })
+  })
 })

@@ -226,4 +226,68 @@ describe("goal plugin e2e harness", () => {
     expect(toasts.at(-1)?.message).toContain("Objective: survive restarts")
     expect(toasts.at(-1)?.message).toContain("Time used: 0s")
   })
+
+  test("/goal clear removes the current goal", async () => {
+    const toasts: any[] = []
+    const client = {
+      tui: { showToast: async (input: any) => void toasts.push(input.body) },
+      session: {
+        messages: async () => [],
+        prompt: async () => undefined,
+      },
+    }
+
+    const hooks = await GoalPlugin({ client } as any)
+    await expect(hooks["command.execute.before"]?.({ command: "goal", sessionID: "clear-session", arguments: "temporary goal" }, { parts: [] })).rejects.toThrow(
+      "__GOAL_HANDLED__",
+    )
+    await expect(hooks["command.execute.before"]?.({ command: "goal", sessionID: "clear-session", arguments: "clear" }, { parts: [] })).rejects.toThrow("__GOAL_HANDLED__")
+
+    expect(JSON.parse(await readFile(stateFile, "utf8"))["clear-session"]).toBeUndefined()
+    expect(toasts.at(-1)?.message).toContain("Goal cleared")
+    expect(toasts.at(-1)?.message).toContain("No goal is currently set")
+  })
+
+  test("updates and appends goals without resetting stats", async () => {
+    const prompts: any[] = []
+    const toasts: any[] = []
+    await writeFile(
+      stateFile,
+      `${JSON.stringify({
+        "session-stats": {
+          objective: "keep existing work",
+          status: "active",
+          createdAt: 1_000,
+          updatedAt: 2_000,
+          activeStartedAt: 3_000,
+          timeUsedSeconds: 45,
+        },
+      })}\n`,
+      "utf8",
+    )
+
+    const client = {
+      tui: { showToast: async (input: any) => void toasts.push(input.body) },
+      session: {
+        messages: async () => [],
+        prompt: async (input: any) => void prompts.push(input),
+      },
+    }
+
+    const hooks = await GoalPlugin({ client } as any)
+    await expect(hooks["command.execute.before"]?.({ command: "goal", sessionID: "session-stats", arguments: "replace the words" }, { parts: [] })).rejects.toThrow(
+      "__GOAL_HANDLED__",
+    )
+    const updated = JSON.parse(await readFile(stateFile, "utf8"))["session-stats"]
+    await expect(hooks["command.execute.before"]?.({ command: "goal", sessionID: "session-stats", arguments: "append and keep more context" }, { parts: [] })).rejects.toThrow(
+      "__GOAL_HANDLED__",
+    )
+
+    const saved = JSON.parse(await readFile(stateFile, "utf8"))["session-stats"]
+    expect(saved).toMatchObject({ objective: "replace the words\nand keep more context", status: "active", createdAt: 1_000 })
+    expect(saved.activeStartedAt).toBe(updated.activeStartedAt)
+    expect(saved.timeUsedSeconds).toBe(45)
+    expect(toasts.at(-1)?.message).toContain("Goal appended")
+    expect(prompts).toHaveLength(0)
+  })
 })

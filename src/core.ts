@@ -11,6 +11,11 @@ export type GoalState = {
 
 export type ContinuationMode = "normal" | "recovery"
 
+export type GoalCommand =
+  | { kind: "show" }
+  | { kind: "clear" | "pause" | "resume" }
+  | { kind: "set" | "append"; objective: string }
+
 export const NO_GOAL = "Usage: /goal <objective>\nNo goal is currently set."
 
 const PROMPT = `Continue working toward the active thread goal.
@@ -45,10 +50,16 @@ const RECOVERY_PROMPT = `Stagnation recovery:
 - If the context feels large or repetitive, compact only the facts needed for the next action; do not stop after compacting.
 - Only stop without tool calls after update_goal has succeeded.`
 
-export const parseGoalCommand = (input: string) => {
+export const parseGoalCommand = (input: string): GoalCommand => {
   const text = input.trim()
+  if (!text) return { kind: "show" }
+
   const lower = text.toLowerCase()
-  return !text ? { kind: "show" as const } : lower === "clear" || lower === "pause" || lower === "resume" ? { kind: lower as "clear" | "pause" | "resume" } : { kind: "set" as const, objective: text }
+  const append = /^append(?:\s+([\s\S]*))?$/i.exec(text)
+  if (append) return { kind: "append", objective: (append[1] ?? "").trim() }
+
+  if (lower === "clear" || lower === "pause" || lower === "resume") return { kind: lower }
+  return { kind: "set", objective: text }
 }
 
 export function formatElapsed(seconds: number): string {
@@ -61,8 +72,16 @@ export function formatElapsed(seconds: number): string {
   return `${Math.floor(hours / 24)}d ${hours % 24}h ${minutes % 60}m`
 }
 
-export const commandHints = (status: GoalStatus) =>
-  status === "active" ? "Commands: /goal pause, /goal clear" : status === "paused" ? "Commands: /goal resume, /goal clear" : "Commands: /goal clear"
+export function commandHints(status: GoalStatus): string {
+  switch (status) {
+    case "active":
+      return "Commands: /goal append <text>, /goal pause, /goal clear"
+    case "paused":
+      return "Commands: /goal append <text>, /goal resume, /goal clear"
+    case "complete":
+      return "Commands: /goal append <text>, /goal clear"
+  }
+}
 
 export const formatGoalSummary = (goal: GoalState, now = Date.now()) =>
   [

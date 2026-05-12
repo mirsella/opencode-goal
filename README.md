@@ -10,7 +10,8 @@ OpenCode server plugin that adds Codex-style `/goal` behavior for long-running t
 ## Commands
 
 - `/goal`: show the current goal or `Usage: /goal <objective>` if none exists.
-- `/goal <objective>`: set or replace the active goal.
+- `/goal <objective>`: set or replace the active goal without resetting its elapsed-time stats.
+- `/goal append <text>`: append text to the active goal without resetting its elapsed-time stats.
 - `/goal pause`: pause auto-continuation.
 - `/goal resume`: resume auto-continuation.
 - `/goal clear`: remove the goal.

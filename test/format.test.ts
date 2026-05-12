@@ -29,13 +29,13 @@ describe("goal summary", () => {
       timeUsedSeconds: 60,
     }
 
-    expect(formatGoalSummary(goal, 62_000)).toBe(["Goal", "Status: active", "Objective: ship it", "Time used: 2m", "", "Commands: /goal pause, /goal clear"].join("\n"))
+    expect(formatGoalSummary(goal, 62_000)).toBe(["Goal", "Status: active", "Objective: ship it", "Time used: 2m", "", "Commands: /goal append <text>, /goal pause, /goal clear"].join("\n"))
   })
 
   test("formats command hints", () => {
-    expect(commandHints("active")).toBe("Commands: /goal pause, /goal clear")
-    expect(commandHints("paused")).toBe("Commands: /goal resume, /goal clear")
-    expect(commandHints("complete")).toBe("Commands: /goal clear")
+    expect(commandHints("active")).toBe("Commands: /goal append <text>, /goal pause, /goal clear")
+    expect(commandHints("paused")).toBe("Commands: /goal append <text>, /goal resume, /goal clear")
+    expect(commandHints("complete")).toBe("Commands: /goal append <text>, /goal clear")
   })
 })
 

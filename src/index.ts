@@ -4,7 +4,7 @@ import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import { tool, type Plugin } from "@opencode-ai/plugin"
 import type { Message, Part, TextPart } from "@opencode-ai/sdk"
-import { NO_GOAL, accounted, commandHints, formatElapsed, formatGoalSummary, parseGoalCommand, renderContinuationPrompt, type ContinuationMode, type GoalState } from "./core"
+import { NO_GOAL, accounted, commandHints, formatElapsed, formatGoalSummary, parseGoalCommand, renderContinuationPrompt, type ContinuationMode, type GoalCommand, type GoalState } from "./core"
 
 const HANDLED = "__GOAL_HANDLED__"
 const TRIGGER_TEXT = "Continue working toward the active goal."
@@ -18,7 +18,7 @@ type Model = { providerID: string; modelID: string }
 type Info = { agent: string; model?: Model; variant?: string; controls?: string[]; fast?: boolean }
 type SessionMessage = { info: Message & Record<string, unknown>; parts: Part[] }
 type PendingContinuation = { sessionID: string; startedAt: number; mode: ContinuationMode; messageID?: string }
-type MutatingCommand = Exclude<ReturnType<typeof parseGoalCommand>, { kind: "show" }> | { kind: "complete" }
+type MutatingCommand = Exclude<GoalCommand, { kind: "show" }> | { kind: "complete" }
 type Result = { ok: boolean; message: string; goal?: GoalState }
 
 const z = tool.schema
@@ -211,6 +211,14 @@ export const GoalPlugin: Plugin = async ({ client, directory, worktree }) => {
 
   const getGoal = (sessionID: string) => goals.get(sessionID)
   const putGoal = (sessionID: string, goal: GoalState | null) => (goal ? goals.set(sessionID, goal) : goals.delete(sessionID))
+  const clearContinuation = (sessionID: string) => {
+    pending.delete(sessionID)
+    inFlight.delete(sessionID)
+  }
+  const resetContinuationState = (sessionID: string) => {
+    clearContinuation(sessionID)
+    stagnantStops.delete(sessionID)
+  }
 
   let persistQueue = Promise.resolve()
   const persistGoals = async () => {
@@ -227,43 +235,61 @@ export const GoalPlugin: Plugin = async ({ client, directory, worktree }) => {
   const mutate = async (sessionID: string, op: MutatingCommand, now = Date.now()): Promise<Result> => {
     const goal = getGoal(sessionID)
     const fail = (message: string) => ({ ok: false, message })
-    const next = async (message: string, goal: GoalState | null): Promise<Result> => {
-      putGoal(sessionID, goal)
+    const save = async (message: string, nextGoal: GoalState | null): Promise<Result> => {
+      putGoal(sessionID, nextGoal)
       await persistGoals()
-      return goal ? { ok: true, message, goal } : { ok: true, message }
+      return nextGoal ? { ok: true, message, goal: nextGoal } : { ok: true, message }
     }
-
-    if (op.kind === "set") {
-      if (!op.objective.trim()) {
-        console.warn("GoalPlugin refused to set an empty objective", { sessionID })
-        return fail("Usage: /goal <objective>")
-      }
-      return next("Goal active", { objective: op.objective.trim(), status: "active", createdAt: now, updatedAt: now, activeStartedAt: now, timeUsedSeconds: 0 })
+    const emptyObjective = () => {
+      console.warn(`GoalPlugin refused to ${op.kind} an empty objective`, { sessionID })
+      return fail(op.kind === "append" ? "Usage: /goal append <text>" : "Usage: /goal <objective>")
     }
-
-    if (!goal) {
-      const messages = { clear: "No goal to clear", pause: "No goal to pause", resume: "No goal to resume", complete: "No active goal to complete" }
+    const missingGoal = (message: string) => {
       console.warn(`GoalPlugin cannot ${op.kind} a missing goal`, { sessionID })
-      return fail(messages[op.kind as keyof typeof messages])
+      return fail(message)
     }
 
-    if (op.kind === "clear") return next("Goal cleared", null)
-    if (op.kind === "pause") {
-      if (goal.status !== "active") {
-        console.warn("GoalPlugin cannot pause a non-active goal", { sessionID, status: goal.status })
-        return fail(`Goal is ${goal.status}`)
+    switch (op.kind) {
+      case "set": {
+        const objective = op.objective.trim()
+        if (!objective) return emptyObjective()
+        return save(
+          goal ? "Goal updated" : "Goal active",
+          goal ? { ...goal, objective, updatedAt: now } : { objective, status: "active", createdAt: now, updatedAt: now, activeStartedAt: now, timeUsedSeconds: 0 },
+        )
       }
-      return next("Goal paused", { ...accounted(goal, now), status: "paused", activeStartedAt: null, updatedAt: now })
-    }
-    if (op.kind === "resume") {
-      if (goal.status !== "paused") {
-        console.warn("GoalPlugin cannot resume a non-paused goal", { sessionID, status: goal.status })
-        return fail(`Goal is ${goal.status}`)
+
+      case "append": {
+        const addition = op.objective.trim()
+        if (!addition) return emptyObjective()
+        if (!goal) return missingGoal("No goal to append")
+        return save("Goal appended", { ...goal, objective: `${goal.objective}\n${addition}`, updatedAt: now })
       }
-      return next("Goal active", { ...goal, status: "active", activeStartedAt: now, updatedAt: now })
-    }
-    if (goal.status === "complete") return next("Goal already complete", goal)
-    return next("Goal complete", { ...accounted(goal, now), status: "complete", activeStartedAt: null, updatedAt: now })
+
+      case "clear":
+        if (!goal) return missingGoal("No goal to clear")
+        return save("Goal cleared", null)
+
+      case "pause":
+        if (!goal) return missingGoal("No goal to pause")
+        if (goal.status !== "active") {
+          console.warn("GoalPlugin cannot pause a non-active goal", { sessionID, status: goal.status })
+          return fail(`Goal is ${goal.status}`)
+        }
+        return save("Goal paused", { ...accounted(goal, now), status: "paused", activeStartedAt: null, updatedAt: now })
+
+      case "resume":
+        if (!goal) return missingGoal("No goal to resume")
+        if (goal.status !== "paused") {
+          console.warn("GoalPlugin cannot resume a non-paused goal", { sessionID, status: goal.status })
+          return fail(`Goal is ${goal.status}`)
+        }
+        return save("Goal active", { ...goal, status: "active", activeStartedAt: now, updatedAt: now })
+
+      case "complete":
+        if (!goal) return missingGoal("No active goal to complete")
+        return goal.status === "complete" ? save("Goal already complete", goal) : save("Goal complete", { ...accounted(goal, now), status: "complete", activeStartedAt: null, updatedAt: now })
+      }
   }
 
   const latest = async (sessionID: string): Promise<Info | undefined> => {
@@ -389,9 +415,7 @@ export const GoalPlugin: Plugin = async ({ client, directory, worktree }) => {
         },
         execute: async (_args, context) => {
           const result = await mutate(context.sessionID, { kind: "complete" })
-          pending.delete(context.sessionID)
-          inFlight.delete(context.sessionID)
-          stagnantStops.delete(context.sessionID)
+          resetContinuationState(context.sessionID)
 
           if (!result.ok || !result.goal) return result.message
           return `${result.message}. Final elapsed time: ${formatElapsed(result.goal.timeUsedSeconds)}. ${commandHints(result.goal.status)}`
@@ -413,8 +437,7 @@ export const GoalPlugin: Plugin = async ({ client, directory, worktree }) => {
           if (goal?.status !== "active") return
 
           const result = await mutate(sessionID, { kind: "pause" })
-          pending.delete(sessionID)
-          inFlight.delete(sessionID)
+          clearContinuation(sessionID)
           if (result.ok) {
             await toast(commandResult("Goal paused after interrupt", result.goal))
           }
@@ -446,8 +469,7 @@ export const GoalPlugin: Plugin = async ({ client, directory, worktree }) => {
         stagnantStops.set(sessionID, stops)
         if (stops >= MAX_STAGNANT_CONTINUATIONS) {
           const result = await mutate(sessionID, { kind: "pause" })
-          pending.delete(sessionID)
-          inFlight.delete(sessionID)
+          clearContinuation(sessionID)
           if (result.ok) {
             await toast(commandResult("Goal paused because recovery continuation stopped without taking action", result.goal), "error", 8000)
           }
@@ -469,12 +491,14 @@ export const GoalPlugin: Plugin = async ({ client, directory, worktree }) => {
         return stop(goal ? formatGoalSummary(goal) : NO_GOAL)
       }
 
+      const editsObjective = op.kind === "set" || op.kind === "append"
+      const startsNewGoal = op.kind === "set" && !getGoal(sessionID)
       const result = await mutate(sessionID, op)
-      pending.delete(sessionID)
-      inFlight.delete(sessionID)
-      stagnantStops.delete(sessionID)
-      if (result.ok && (op.kind === "set" || op.kind === "resume")) await startContinuation(sessionID, { ignoreDebounce: true })
-      return stop(result.ok && result.goal ? commandResult(result.message, result.goal) : result.ok ? result.message : op.kind === "clear" ? `${result.message}\n${NO_GOAL}` : result.message, result.ok ? "info" : "error")
+      if (!editsObjective) resetContinuationState(sessionID)
+      if (result.ok && (op.kind === "resume" || startsNewGoal)) await startContinuation(sessionID, { ignoreDebounce: true })
+
+      const message = op.kind === "clear" ? `${result.message}\n${NO_GOAL}` : result.ok && result.goal ? commandResult(result.message, result.goal) : result.message
+      return stop(message, result.ok ? "info" : "error")
     },
 
     "chat.message": async (input, output) => {
