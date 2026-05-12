@@ -1,6 +1,6 @@
 {
   "name": "opencode-goal",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "description": "Add Codex-style long-running goals to OpenCode",
   "main": "./src/index.ts",
