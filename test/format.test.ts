@@ -35,7 +35,7 @@ describe("goal summary", () => {
   test("formats command hints", () => {
     expect(commandHints("active")).toBe("Commands: /goal append <text>, /goal pause, /goal clear")
     expect(commandHints("paused")).toBe("Commands: /goal append <text>, /goal resume, /goal clear")
-    expect(commandHints("complete")).toBe("Commands: /goal append <text>, /goal clear")
+    expect(commandHints("complete")).toBe("Commands: /goal append <text>, /goal resume, /goal clear")
   })
 })
 

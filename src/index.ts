@@ -19,7 +19,8 @@ type Info = { agent: string; model?: Model; variant?: string; controls?: string[
 type SessionMessage = { info: Message & Record<string, unknown>; parts: Part[] }
 type PendingContinuation = { sessionID: string; startedAt: number; mode: ContinuationMode; messageID?: string }
 type MutatingCommand = Exclude<GoalCommand, { kind: "show" }> | { kind: "complete" }
-type Result = { ok: boolean; message: string; goal?: GoalState }
+type ContinuationEffect = "keep" | "clear" | "restart"
+type Result = ({ ok: true; message: string; goal?: GoalState } | { ok: false; message: string }) & { continuation: ContinuationEffect }
 
 const z = tool.schema
 
@@ -220,6 +221,12 @@ export const GoalPlugin: Plugin = async ({ client, directory, worktree }) => {
     stagnantStops.delete(sessionID)
   }
 
+  const applyContinuationEffect = async (sessionID: string, effect: ContinuationEffect) => {
+    if (effect === "keep") return
+    resetContinuationState(sessionID)
+    if (effect === "restart") await startContinuation(sessionID, { ignoreDebounce: true })
+  }
+
   let persistQueue = Promise.resolve()
   const persistGoals = async () => {
     const snapshot = new Map(goals)
@@ -234,19 +241,26 @@ export const GoalPlugin: Plugin = async ({ client, directory, worktree }) => {
 
   const mutate = async (sessionID: string, op: MutatingCommand, now = Date.now()): Promise<Result> => {
     const goal = getGoal(sessionID)
-    const fail = (message: string) => ({ ok: false, message })
-    const save = async (message: string, nextGoal: GoalState | null): Promise<Result> => {
+    const fail = (message: string, continuation: ContinuationEffect = "keep"): Result => ({ ok: false, message, continuation })
+    const activate = (current: GoalState, objective = current.objective): GoalState => ({
+      ...current,
+      objective,
+      status: "active",
+      activeStartedAt: current.status === "active" ? current.activeStartedAt : now,
+      updatedAt: now,
+    })
+    const save = async (message: string, nextGoal: GoalState | null, continuation: ContinuationEffect): Promise<Result> => {
       putGoal(sessionID, nextGoal)
       await persistGoals()
-      return nextGoal ? { ok: true, message, goal: nextGoal } : { ok: true, message }
+      return nextGoal ? { ok: true, message, goal: nextGoal, continuation } : { ok: true, message, continuation }
     }
     const emptyObjective = () => {
       console.warn(`GoalPlugin refused to ${op.kind} an empty objective`, { sessionID })
       return fail(op.kind === "append" ? "Usage: /goal append <text>" : "Usage: /goal <objective>")
     }
-    const missingGoal = (message: string) => {
+    const missingGoal = (message: string, continuation: ContinuationEffect = "keep") => {
       console.warn(`GoalPlugin cannot ${op.kind} a missing goal`, { sessionID })
-      return fail(message)
+      return fail(message, continuation)
     }
 
     switch (op.kind) {
@@ -255,7 +269,8 @@ export const GoalPlugin: Plugin = async ({ client, directory, worktree }) => {
         if (!objective) return emptyObjective()
         return save(
           goal ? "Goal updated" : "Goal active",
-          goal ? { ...goal, objective, updatedAt: now } : { objective, status: "active", createdAt: now, updatedAt: now, activeStartedAt: now, timeUsedSeconds: 0 },
+          goal ? activate(goal, objective) : { objective, status: "active", createdAt: now, updatedAt: now, activeStartedAt: now, timeUsedSeconds: 0 },
+          "restart",
         )
       }
 
@@ -263,32 +278,34 @@ export const GoalPlugin: Plugin = async ({ client, directory, worktree }) => {
         const addition = op.objective.trim()
         if (!addition) return emptyObjective()
         if (!goal) return missingGoal("No goal to append")
-        return save("Goal appended", { ...goal, objective: `${goal.objective}\n${addition}`, updatedAt: now })
+        return save("Goal appended", activate(goal, `${goal.objective}\n${addition}`), "restart")
       }
 
       case "clear":
-        if (!goal) return missingGoal("No goal to clear")
-        return save("Goal cleared", null)
+        if (!goal) return missingGoal("No goal to clear", "clear")
+        return save("Goal cleared", null, "clear")
 
       case "pause":
-        if (!goal) return missingGoal("No goal to pause")
+        if (!goal) return missingGoal("No goal to pause", "clear")
         if (goal.status !== "active") {
           console.warn("GoalPlugin cannot pause a non-active goal", { sessionID, status: goal.status })
-          return fail(`Goal is ${goal.status}`)
+          return fail(`Goal is ${goal.status}`, "clear")
         }
-        return save("Goal paused", { ...accounted(goal, now), status: "paused", activeStartedAt: null, updatedAt: now })
+        return save("Goal paused", { ...accounted(goal, now), status: "paused", activeStartedAt: null, updatedAt: now }, "clear")
 
       case "resume":
         if (!goal) return missingGoal("No goal to resume")
-        if (goal.status !== "paused") {
-          console.warn("GoalPlugin cannot resume a non-paused goal", { sessionID, status: goal.status })
+        if (goal.status === "active") {
+          console.warn("GoalPlugin cannot resume an already-active goal", { sessionID, status: goal.status })
           return fail(`Goal is ${goal.status}`)
         }
-        return save("Goal active", { ...goal, status: "active", activeStartedAt: now, updatedAt: now })
+        return save("Goal active", activate(goal), "restart")
 
       case "complete":
-        if (!goal) return missingGoal("No active goal to complete")
-        return goal.status === "complete" ? save("Goal already complete", goal) : save("Goal complete", { ...accounted(goal, now), status: "complete", activeStartedAt: null, updatedAt: now })
+        if (!goal) return missingGoal("No active goal to complete", "clear")
+        return goal.status === "complete"
+          ? save("Goal already complete", goal, "clear")
+          : save("Goal complete", { ...accounted(goal, now), status: "complete", activeStartedAt: null, updatedAt: now }, "clear")
       }
   }
 
@@ -415,7 +432,7 @@ export const GoalPlugin: Plugin = async ({ client, directory, worktree }) => {
         },
         execute: async (_args, context) => {
           const result = await mutate(context.sessionID, { kind: "complete" })
-          resetContinuationState(context.sessionID)
+          await applyContinuationEffect(context.sessionID, result.continuation)
 
           if (!result.ok || !result.goal) return result.message
           return `${result.message}. Final elapsed time: ${formatElapsed(result.goal.timeUsedSeconds)}. ${commandHints(result.goal.status)}`
@@ -491,11 +508,8 @@ export const GoalPlugin: Plugin = async ({ client, directory, worktree }) => {
         return stop(goal ? formatGoalSummary(goal) : NO_GOAL)
       }
 
-      const editsObjective = op.kind === "set" || op.kind === "append"
-      const startsNewGoal = op.kind === "set" && !getGoal(sessionID)
       const result = await mutate(sessionID, op)
-      if (!editsObjective) resetContinuationState(sessionID)
-      if (result.ok && (op.kind === "resume" || startsNewGoal)) await startContinuation(sessionID, { ignoreDebounce: true })
+      await applyContinuationEffect(sessionID, result.continuation)
 
       const message = op.kind === "clear" ? `${result.message}\n${NO_GOAL}` : result.ok && result.goal ? commandResult(result.message, result.goal) : result.message
       return stop(message, result.ok ? "info" : "error")

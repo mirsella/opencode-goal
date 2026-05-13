@@ -73,14 +73,8 @@ export function formatElapsed(seconds: number): string {
 }
 
 export function commandHints(status: GoalStatus): string {
-  switch (status) {
-    case "active":
-      return "Commands: /goal append <text>, /goal pause, /goal clear"
-    case "paused":
-      return "Commands: /goal append <text>, /goal resume, /goal clear"
-    case "complete":
-      return "Commands: /goal append <text>, /goal clear"
-  }
+  const command: Record<GoalStatus, "pause" | "resume"> = { active: "pause", paused: "resume", complete: "resume" }
+  return `Commands: /goal append <text>, /goal ${command[status]}, /goal clear`
 }
 
 export const formatGoalSummary = (goal: GoalState, now = Date.now()) =>

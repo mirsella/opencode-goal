@@ -251,6 +251,7 @@ describe("goal plugin e2e harness", () => {
   test("updates and appends goals without resetting stats", async () => {
     const prompts: any[] = []
     const toasts: any[] = []
+    const startedAt = Date.now()
     await writeFile(
       stateFile,
       `${JSON.stringify({
@@ -259,7 +260,7 @@ describe("goal plugin e2e harness", () => {
           status: "active",
           createdAt: 1_000,
           updatedAt: 2_000,
-          activeStartedAt: 3_000,
+          activeStartedAt: startedAt,
           timeUsedSeconds: 45,
         },
       })}\n`,
@@ -285,9 +286,71 @@ describe("goal plugin e2e harness", () => {
 
     const saved = JSON.parse(await readFile(stateFile, "utf8"))["session-stats"]
     expect(saved).toMatchObject({ objective: "replace the words\nand keep more context", status: "active", createdAt: 1_000 })
-    expect(saved.activeStartedAt).toBe(updated.activeStartedAt)
-    expect(saved.timeUsedSeconds).toBe(45)
+    expect(saved.activeStartedAt).toBeGreaterThanOrEqual(updated.activeStartedAt)
+    expect(saved.timeUsedSeconds).toBeGreaterThanOrEqual(45)
     expect(toasts.at(-1)?.message).toContain("Goal appended")
-    expect(prompts).toHaveLength(0)
+    expect(prompts).toHaveLength(2)
+  })
+
+  test("set append and resume restart completed goals", async () => {
+    const prompts: any[] = []
+    const toasts: any[] = []
+    await writeFile(
+      stateFile,
+      `${JSON.stringify({
+        "session-set": {
+          objective: "finished set",
+          status: "complete",
+          createdAt: 1_000,
+          updatedAt: 2_000,
+          activeStartedAt: null,
+          timeUsedSeconds: 45,
+        },
+        "session-append": {
+          objective: "finished append",
+          status: "complete",
+          createdAt: 1_000,
+          updatedAt: 2_000,
+          activeStartedAt: null,
+          timeUsedSeconds: 45,
+        },
+        "session-resume": {
+          objective: "finished resume",
+          status: "complete",
+          createdAt: 1_000,
+          updatedAt: 2_000,
+          activeStartedAt: null,
+          timeUsedSeconds: 45,
+        },
+      })}\n`,
+      "utf8",
+    )
+
+    const client = {
+      tui: { showToast: async (input: any) => void toasts.push(input.body) },
+      session: {
+        messages: async () => [],
+        prompt: async (input: any) => void prompts.push(input),
+      },
+    }
+
+    const hooks = await GoalPlugin({ client } as any)
+    await expect(hooks["command.execute.before"]?.({ command: "goal", sessionID: "session-set", arguments: "new work" }, { parts: [] })).rejects.toThrow("__GOAL_HANDLED__")
+    await expect(hooks["command.execute.before"]?.({ command: "goal", sessionID: "session-append", arguments: "append more work" }, { parts: [] })).rejects.toThrow(
+      "__GOAL_HANDLED__",
+    )
+    await expect(hooks["command.execute.before"]?.({ command: "goal", sessionID: "session-resume", arguments: "resume" }, { parts: [] })).rejects.toThrow(
+      "__GOAL_HANDLED__",
+    )
+
+    const saved = JSON.parse(await readFile(stateFile, "utf8"))
+    expect(saved["session-set"]).toMatchObject({ objective: "new work", status: "active", createdAt: 1_000, timeUsedSeconds: 45 })
+    expect(saved["session-append"]).toMatchObject({ objective: "finished append\nmore work", status: "active", createdAt: 1_000, timeUsedSeconds: 45 })
+    expect(saved["session-resume"]).toMatchObject({ objective: "finished resume", status: "active", createdAt: 1_000, timeUsedSeconds: 45 })
+    expect(saved["session-set"].activeStartedAt).toBeNumber()
+    expect(saved["session-append"].activeStartedAt).toBeNumber()
+    expect(saved["session-resume"].activeStartedAt).toBeNumber()
+    expect(prompts).toHaveLength(3)
+    expect(toasts.at(-1)?.message).toContain("Goal active")
   })
 })
