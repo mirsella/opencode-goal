@@ -15,7 +15,8 @@ const MAX_STAGNANT_CONTINUATIONS = 3
 const STATE_FILE_ENV = "OPENCODE_GOAL_STATE_FILE"
 
 type Model = { providerID: string; modelID: string }
-type Info = { agent: string; model?: Model; variant?: string; controls?: string[]; fast?: boolean }
+type PromptInfo = { agent?: string; model?: Model; variant?: string; controls?: string[]; fast?: boolean }
+type PromptInfoUpdate = Omit<PromptInfo, "variant"> & { variant?: string | null }
 type SessionMessage = { info: Message & Record<string, unknown>; parts: Part[] }
 type PendingContinuation = { sessionID: string; startedAt: number; mode: ContinuationMode; messageID?: string }
 type MutatingCommand = Exclude<GoalCommand, { kind: "show" }> | { kind: "complete" }
@@ -170,21 +171,56 @@ function findAnchorMessage(messages: SessionMessage[], sessionID: string, hidden
   return undefined
 }
 
-function planLike(info: Info | undefined): boolean {
+function planLike(info: PromptInfo | undefined): boolean {
   if (!info) return false
-  if (info.agent.toLowerCase() === "plan") return true
+  if (info.agent?.toLowerCase() === "plan") return true
   if (info.variant?.toLowerCase().includes("plan")) return true
   return info.controls?.some((control) => control.toLowerCase().includes("plan")) ?? false
 }
 
-function makeInfo(input: { agent: string; model?: Model | undefined; variant?: string | undefined; controls?: string[] | undefined; fast?: boolean | undefined }): Info {
+function promptInfoFromModel(value: unknown): PromptInfoUpdate {
+  if (!isRecord(value)) return {}
+
+  const providerID = typeof value.providerID === "string" ? value.providerID : undefined
+  const modelID = typeof value.modelID === "string" ? value.modelID : typeof value.id === "string" ? value.id : undefined
+  if (!providerID || !modelID) return {}
+
   return {
-    agent: input.agent,
-    ...(input.model ? { model: input.model } : {}),
-    ...(input.variant ? { variant: input.variant } : {}),
-    ...(input.controls ? { controls: input.controls } : {}),
-    ...(input.fast !== undefined ? { fast: input.fast } : {}),
+    model: { providerID, modelID },
+    ...(typeof value.variant === "string" ? { variant: value.variant || null } : {}),
   }
+}
+
+function promptInfoFromMessage(info: Record<string, unknown>): PromptInfo | undefined {
+  const controls = Array.isArray(info.controls) ? info.controls.filter((item): item is string => typeof item === "string") : undefined
+  const fast = typeof info.fast === "boolean" ? info.fast : undefined
+  const variant = typeof info.variant === "string" && info.variant ? info.variant : undefined
+  const common = {
+    ...(controls ? { controls } : {}),
+    ...(fast !== undefined ? { fast } : {}),
+  }
+
+  if (info.role === "user" && typeof info.agent === "string") {
+    const modelInfo = promptInfoFromModel(info.model)
+    const selectedVariant = variant ?? (modelInfo.variant || undefined)
+    return {
+      ...common,
+      agent: info.agent,
+      ...(modelInfo.model ? { model: modelInfo.model } : {}),
+      ...(selectedVariant ? { variant: selectedVariant } : {}),
+    }
+  }
+
+  if (info.role === "assistant" && (typeof info.agent === "string" || typeof info.mode === "string") && typeof info.providerID === "string" && typeof info.modelID === "string") {
+    return {
+      ...common,
+      agent: (info.agent as string | undefined) ?? (info.mode as string),
+      model: { providerID: info.providerID, modelID: info.modelID },
+      ...(variant ? { variant } : {}),
+    }
+  }
+
+  return undefined
 }
 
 function commandResult(message: string, goal?: GoalState) {
@@ -198,6 +234,7 @@ export const GoalPlugin: Plugin = async ({ client, directory, worktree }) => {
   const inFlight = new Set<string>()
   const pending = new Map<string, PendingContinuation>()
   const triggerMessages = new Map<string, string>()
+  const rememberedInfo = new Map<string, PromptInfo>()
   const lastStarted = new Map<string, number>()
   const lastAssistantFinish = new Map<string, string>()
   const stagnantStops = new Map<string, number>()
@@ -212,6 +249,30 @@ export const GoalPlugin: Plugin = async ({ client, directory, worktree }) => {
 
   const getGoal = (sessionID: string) => goals.get(sessionID)
   const putGoal = (sessionID: string, goal: GoalState | null) => (goal ? goals.set(sessionID, goal) : goals.delete(sessionID))
+  const rememberInfo = (sessionID: string, patch: PromptInfoUpdate) => {
+    if (!Object.keys(patch).length) return
+
+    const next = { ...(rememberedInfo.get(sessionID) ?? {}) }
+
+    if (patch.agent !== undefined) {
+      next.agent = patch.agent
+    }
+    if (patch.model !== undefined) {
+      next.model = patch.model
+    }
+    if (patch.variant !== undefined) {
+      if (patch.variant) next.variant = patch.variant
+      else delete next.variant
+    }
+    if (patch.controls !== undefined) {
+      next.controls = patch.controls
+    }
+    if (patch.fast !== undefined) {
+      next.fast = patch.fast
+    }
+
+    rememberedInfo.set(sessionID, next)
+  }
   const clearContinuation = (sessionID: string) => {
     pending.delete(sessionID)
     inFlight.delete(sessionID)
@@ -309,31 +370,18 @@ export const GoalPlugin: Plugin = async ({ client, directory, worktree }) => {
       }
   }
 
-  const latest = async (sessionID: string): Promise<Info | undefined> => {
+  const latest = async (sessionID: string): Promise<PromptInfo | undefined> => {
     const result = await client.session.messages({ path: { id: sessionID }, query: { limit: 100 } }).catch((error) => {
       console.warn("GoalPlugin could not inspect session messages for continuation metadata", error)
       return []
     })
 
-    const messages = (Array.isArray(result) ? result : ((result as { data?: unknown[] }).data ?? [])) as Array<{ info?: Record<string, unknown> }>
-    return [...messages].reverse().flatMap((message): Info[] => {
+    const messages = (Array.isArray(result) ? result : ((result as { data?: unknown[] }).data ?? [])) as Array<{ info?: unknown }>
+    return [...messages].reverse().flatMap((message): PromptInfo[] => {
       const info = message.info
-      if (!info) return []
-
-      const controls = Array.isArray(info.controls) ? info.controls.filter((item): item is string => typeof item === "string") : undefined
-      const variant = typeof info.variant === "string" ? info.variant : undefined
-      const fast = typeof info.fast === "boolean" ? info.fast : undefined
-
-      if (info.role === "user" && typeof info.agent === "string") {
-        const model = info.model as Model | undefined
-        return [makeInfo({ agent: info.agent, model, variant, controls, fast })]
-      }
-
-      if (info.role === "assistant" && (typeof info.agent === "string" || typeof info.mode === "string") && typeof info.providerID === "string" && typeof info.modelID === "string") {
-        return [makeInfo({ agent: (info.agent as string | undefined) ?? (info.mode as string), model: { providerID: info.providerID, modelID: info.modelID }, variant, controls, fast })]
-      }
-
-      return []
+      if (!isRecord(info)) return []
+      const parsed = promptInfoFromMessage(info)
+      return parsed ? [parsed] : []
     })[0]
   }
 
@@ -347,7 +395,7 @@ export const GoalPlugin: Plugin = async ({ client, directory, worktree }) => {
     putGoal(sessionID, accounted(goal, now))
     await persistGoals()
 
-    const info = await latest(sessionID)
+    const info = (await latest(sessionID)) ?? rememberedInfo.get(sessionID)
     if (planLike(info)) {
       pending.delete(sessionID)
       await toast("Goal continuation skipped in plan mode")
@@ -441,15 +489,52 @@ export const GoalPlugin: Plugin = async ({ client, directory, worktree }) => {
     },
 
     event: async ({ event }) => {
-      if (event.type === "message.updated") {
-        const info = (event.properties as { info?: Message }).info
-        if (info?.role === "assistant" && typeof info.finish === "string") {
-          lastAssistantFinish.set(info.sessionID, info.finish)
-          if (info.finish !== "stop") stagnantStops.delete(info.sessionID)
+      const eventRecord = event as { type?: string; properties?: unknown; data?: unknown }
+      const eventType = eventRecord.type
+      const payload = isRecord(eventRecord.properties) ? eventRecord.properties : isRecord(eventRecord.data) ? eventRecord.data : undefined
+
+      if (eventType === "session.next.agent.switched" || eventType === "session.next.model.switched" || eventType === "session.next.step.started") {
+        if (!payload) {
+          console.warn("GoalPlugin ignored prompt metadata event without object payload", { eventType })
+          return
         }
 
-        if (info?.role === "assistant" && info.error?.name === "MessageAbortedError") {
-          const sessionID = info.sessionID
+        const sessionID = typeof payload.sessionID === "string" ? payload.sessionID : undefined
+        if (!sessionID) {
+          console.warn("GoalPlugin ignored prompt metadata event without a sessionID", { eventType })
+          return
+        }
+
+        const modelInfo = promptInfoFromModel(payload.model)
+        if (payload.model !== undefined && !modelInfo.model) console.warn("GoalPlugin ignored malformed prompt model metadata", { eventType, sessionID })
+
+        rememberInfo(sessionID, {
+          ...(typeof payload.agent === "string" ? { agent: payload.agent } : {}),
+          ...modelInfo,
+        })
+        return
+      }
+
+      if (eventType === "message.updated") {
+        const info = payload?.info
+        if (!isRecord(info)) {
+          console.warn("GoalPlugin ignored message.updated without message info")
+          return
+        }
+
+        const sessionID = typeof info.sessionID === "string" ? info.sessionID : undefined
+        if (sessionID) {
+          const parsed = promptInfoFromMessage(info)
+          if (parsed) rememberInfo(sessionID, parsed)
+        }
+
+        if (info.role === "assistant" && typeof info.finish === "string" && sessionID) {
+          lastAssistantFinish.set(sessionID, info.finish)
+          if (info.finish !== "stop") stagnantStops.delete(sessionID)
+        }
+
+        const error = isRecord(info.error) ? info.error : undefined
+        if (info.role === "assistant" && error?.name === "MessageAbortedError" && sessionID) {
           const goal = getGoal(sessionID)
           if (goal?.status !== "active") return
 
@@ -462,16 +547,16 @@ export const GoalPlugin: Plugin = async ({ client, directory, worktree }) => {
         return
       }
 
-      if (event.type !== "session.status") return
+      if (eventType !== "session.status") return
 
-      const properties = event.properties as { sessionID?: string; status?: { type?: string } }
-      const sessionID = properties.sessionID
+      const sessionID = typeof payload?.sessionID === "string" ? payload.sessionID : undefined
       if (!sessionID) {
         console.warn("GoalPlugin received session.status without a sessionID")
         return
       }
 
-      if (properties.status?.type !== "idle") {
+      const status = isRecord(payload?.status) ? payload.status : undefined
+      if (status?.type !== "idle") {
         return
       }
 
@@ -516,6 +601,12 @@ export const GoalPlugin: Plugin = async ({ client, directory, worktree }) => {
     },
 
     "chat.message": async (input, output) => {
+      rememberInfo(input.sessionID, {
+        ...(typeof input.agent === "string" ? { agent: input.agent } : {}),
+        ...promptInfoFromModel(input.model),
+        ...(typeof input.variant === "string" ? { variant: input.variant || null } : {}),
+      })
+
       const text = output.parts.find(isTextPart)
       if (!text || !isGoalTriggerPart(text)) return
 

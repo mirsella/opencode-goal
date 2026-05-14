@@ -103,6 +103,74 @@ describe("goal plugin e2e harness", () => {
     expect(injected?.text).not.toContain("Token budget")
   })
 
+  test("forwards the selected model variant from user message metadata", async () => {
+    const prompts: any[] = []
+    const client = {
+      tui: { showToast: async () => undefined },
+      session: {
+        messages: async () => [
+          {
+            info: {
+              id: "msg-user",
+              sessionID: "session-variant-message",
+              role: "user",
+              agent: "build",
+              model: { providerID: "test", modelID: "test-model", variant: "thinking" },
+              time: { created: Date.now() },
+            },
+            parts: [],
+          },
+        ],
+        prompt: async (input: any) => void prompts.push(input),
+      },
+    }
+
+    const hooks = await GoalPlugin({ client } as any)
+    await expect(hooks["command.execute.before"]?.({ command: "goal", sessionID: "session-variant-message", arguments: "preserve thinking" }, { parts: [] })).rejects.toThrow(
+      "__GOAL_HANDLED__",
+    )
+
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]?.body).toMatchObject({
+      agent: "build",
+      model: { providerID: "test", modelID: "test-model" },
+      variant: "thinking",
+    })
+  })
+
+  test("remembers the selected model variant before the first message", async () => {
+    const prompts: any[] = []
+    const client = {
+      tui: { showToast: async () => undefined },
+      session: {
+        messages: async () => [],
+        prompt: async (input: any) => void prompts.push(input),
+      },
+    }
+
+    const hooks = await GoalPlugin({ client } as any)
+    await hooks.event?.({
+      event: {
+        type: "session.next.model.switched",
+        properties: {
+          sessionID: "session-variant-event",
+          model: { id: "test-model", providerID: "test", variant: "thinking" },
+        },
+      },
+    } as any)
+
+    await expect(hooks["command.execute.before"]?.({ command: "goal", sessionID: "session-variant-event", arguments: "preserve event thinking" }, { parts: [] })).rejects.toThrow(
+      "__GOAL_HANDLED__",
+    )
+
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]?.body).toMatchObject({
+      agent: "build",
+      model: { providerID: "test", modelID: "test-model" },
+      variant: "thinking",
+    })
+  })
+
   test("assistant aborts are ignored when the session has no goal", async () => {
     const toasts: any[] = []
     const warnings: unknown[][] = []
