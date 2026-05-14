@@ -11,7 +11,6 @@ const TRIGGER_TEXT = "Continue working toward the active goal."
 const TRIGGER_METADATA = "opencode-goal-continuation-trigger"
 const START_DEBOUNCE_MS = 750
 const RECOVERY_STAGNANT_CONTINUATIONS = 2
-const MAX_STAGNANT_CONTINUATIONS = 3
 const STATE_FILE_ENV = "OPENCODE_GOAL_STATE_FILE"
 
 type Model = { providerID: string; modelID: string }
@@ -569,13 +568,8 @@ export const GoalPlugin: Plugin = async ({ client, directory, worktree }) => {
       if (wasInFlight && lastAssistantFinish.get(sessionID) === "stop") {
         const stops = (stagnantStops.get(sessionID) ?? 0) + 1
         stagnantStops.set(sessionID, stops)
-        if (stops >= MAX_STAGNANT_CONTINUATIONS) {
-          const result = await mutate(sessionID, { kind: "pause" })
-          clearContinuation(sessionID)
-          if (result.ok) {
-            await toast(commandResult("Goal paused because recovery continuation stopped without taking action", result.goal), "error", 8000)
-          }
-          return
+        if (stops >= RECOVERY_STAGNANT_CONTINUATIONS) {
+          console.warn("GoalPlugin continuing active goal after stop-only continuation", { sessionID, stagnantStops: stops })
         }
       }
 

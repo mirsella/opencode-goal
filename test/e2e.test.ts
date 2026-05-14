@@ -208,7 +208,7 @@ describe("goal plugin e2e harness", () => {
     }
   })
 
-  test("uses a recovery prompt before pausing repeated stop-only continuations", async () => {
+  test("keeps using recovery prompts for repeated stop-only continuations", async () => {
     const prompts: any[] = []
     const toasts: any[] = []
     const client = {
@@ -252,9 +252,12 @@ describe("goal plugin e2e harness", () => {
 
     await hooks.event?.({ event: { type: "message.updated", properties: { info: { sessionID: "session-loop", role: "assistant", finish: "stop" } } } } as any)
     await hooks.event?.({ event: { type: "session.status", properties: { sessionID: "session-loop", status: { type: "idle" } } } } as any)
-    expect(prompts).toHaveLength(3)
-    expect(toasts.at(-1)?.message).toContain("Goal paused because recovery continuation stopped without taking action")
-    expect(toasts.at(-1)?.variant).toBe("error")
+    expect(prompts).toHaveLength(4)
+    expect(await injectPending("msg-loop-4")).toContain("Stagnation recovery")
+    expect(toasts.some((toast) => toast.message.includes("Goal paused because recovery continuation stopped without taking action"))).toBe(false)
+
+    await expect(hooks["command.execute.before"]?.({ command: "goal", sessionID: "session-loop", arguments: "" }, { parts: [] })).rejects.toThrow("__GOAL_HANDLED__")
+    expect(toasts.at(-1)?.message).toContain("Status: active")
   })
 
   test("persists goals per session and restores them after plugin restart", async () => {
