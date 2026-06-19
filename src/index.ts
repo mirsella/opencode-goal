@@ -4,9 +4,9 @@ import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import { tool, type Plugin } from "@opencode-ai/plugin"
 import type { Message, Part, TextPart } from "@opencode-ai/sdk"
+import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse"
 import { NO_GOAL, accounted, commandHints, formatElapsed, formatGoalSummary, parseGoalCommand, renderContinuationPrompt, type ContinuationMode, type GoalCommand, type GoalState } from "./core"
 
-const HANDLED = "__GOAL_HANDLED__"
 const TRIGGER_TEXT = "Continue working toward the active goal."
 const TRIGGER_METADATA = "opencode-goal-continuation-trigger"
 const START_DEBOUNCE_MS = 750
@@ -243,7 +243,9 @@ export const GoalPlugin: Plugin = async ({ client, directory, worktree }) => {
 
   const stop = async (message: string, variant: "info" | "error" = "info"): Promise<never> => {
     await toast(message, variant)
-    throw new Error(HANDLED)
+    // OpenCode command hooks cannot cancel the downstream LLM call directly.
+    // Throwing this Effect response makes the command endpoint return a clean 204.
+    throw HttpServerResponse.empty()
   }
 
   const getGoal = (sessionID: string) => goals.get(sessionID)

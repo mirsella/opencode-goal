@@ -8,6 +8,11 @@ let previousStateFile: string | undefined
 let stateDir: string | undefined
 let stateFile = ""
 
+async function expectCommandHandled(result: Promise<unknown> | undefined) {
+  expect(result).toBeInstanceOf(Promise)
+  await expect(result as Promise<unknown>).rejects.toMatchObject({ status: 204 })
+}
+
 beforeEach(async () => {
   previousStateFile = process.env.OPENCODE_GOAL_STATE_FILE
   stateDir = await mkdtemp(join(tmpdir(), "opencode-goal-"))
@@ -42,12 +47,12 @@ describe("goal plugin e2e harness", () => {
     }
 
     const hooks = await GoalPlugin({ client } as any)
-    await expect(
+    await expectCommandHandled(
       hooks["command.execute.before"]?.(
         { command: "goal", sessionID: "session-1", arguments: "create goal-smoke.txt and verify it exists" },
         { parts: [] },
       ),
-    ).rejects.toThrow("__GOAL_HANDLED__")
+    )
 
     expect(prompts).toHaveLength(1)
     expect(prompts[0]).toMatchObject({
@@ -126,9 +131,7 @@ describe("goal plugin e2e harness", () => {
     }
 
     const hooks = await GoalPlugin({ client } as any)
-    await expect(hooks["command.execute.before"]?.({ command: "goal", sessionID: "session-variant-message", arguments: "preserve thinking" }, { parts: [] })).rejects.toThrow(
-      "__GOAL_HANDLED__",
-    )
+    await expectCommandHandled(hooks["command.execute.before"]?.({ command: "goal", sessionID: "session-variant-message", arguments: "preserve thinking" }, { parts: [] }))
 
     expect(prompts).toHaveLength(1)
     expect(prompts[0]?.body).toMatchObject({
@@ -159,9 +162,7 @@ describe("goal plugin e2e harness", () => {
       },
     } as any)
 
-    await expect(hooks["command.execute.before"]?.({ command: "goal", sessionID: "session-variant-event", arguments: "preserve event thinking" }, { parts: [] })).rejects.toThrow(
-      "__GOAL_HANDLED__",
-    )
+    await expectCommandHandled(hooks["command.execute.before"]?.({ command: "goal", sessionID: "session-variant-event", arguments: "preserve event thinking" }, { parts: [] }))
 
     expect(prompts).toHaveLength(1)
     expect(prompts[0]?.body).toMatchObject({
@@ -234,9 +235,7 @@ describe("goal plugin e2e harness", () => {
       return output.messages[0]?.parts[0]?.text ?? ""
     }
 
-    await expect(hooks["command.execute.before"]?.({ command: "goal", sessionID: "session-loop", arguments: "keep improving until complete" }, { parts: [] })).rejects.toThrow(
-      "__GOAL_HANDLED__",
-    )
+    await expectCommandHandled(hooks["command.execute.before"]?.({ command: "goal", sessionID: "session-loop", arguments: "keep improving until complete" }, { parts: [] }))
     expect(prompts).toHaveLength(1)
     expect(await injectPending("msg-loop-1")).not.toContain("Stagnation recovery")
 
@@ -256,7 +255,7 @@ describe("goal plugin e2e harness", () => {
     expect(await injectPending("msg-loop-4")).toContain("Stagnation recovery")
     expect(toasts.some((toast) => toast.message.includes("Goal paused because recovery continuation stopped without taking action"))).toBe(false)
 
-    await expect(hooks["command.execute.before"]?.({ command: "goal", sessionID: "session-loop", arguments: "" }, { parts: [] })).rejects.toThrow("__GOAL_HANDLED__")
+    await expectCommandHandled(hooks["command.execute.before"]?.({ command: "goal", sessionID: "session-loop", arguments: "" }, { parts: [] }))
     expect(toasts.at(-1)?.message).toContain("Status: active")
   })
 
@@ -270,9 +269,7 @@ describe("goal plugin e2e harness", () => {
     }
 
     const firstHooks = await GoalPlugin({ client: firstClient } as any)
-    await expect(firstHooks["command.execute.before"]?.({ command: "goal", sessionID: "persisted-session", arguments: "survive restarts" }, { parts: [] })).rejects.toThrow(
-      "__GOAL_HANDLED__",
-    )
+    await expectCommandHandled(firstHooks["command.execute.before"]?.({ command: "goal", sessionID: "persisted-session", arguments: "survive restarts" }, { parts: [] }))
 
     const saved = JSON.parse(await readFile(stateFile, "utf8"))
     expect(saved["persisted-session"]).toMatchObject({ objective: "survive restarts", status: "active" })
@@ -289,9 +286,7 @@ describe("goal plugin e2e harness", () => {
     }
 
     const secondHooks = await GoalPlugin({ client: secondClient } as any)
-    await expect(secondHooks["command.execute.before"]?.({ command: "goal", sessionID: "persisted-session", arguments: "" }, { parts: [] })).rejects.toThrow(
-      "__GOAL_HANDLED__",
-    )
+    await expectCommandHandled(secondHooks["command.execute.before"]?.({ command: "goal", sessionID: "persisted-session", arguments: "" }, { parts: [] }))
 
     expect(toasts.at(-1)?.message).toContain("Status: active")
     expect(toasts.at(-1)?.message).toContain("Objective: survive restarts")
@@ -309,10 +304,8 @@ describe("goal plugin e2e harness", () => {
     }
 
     const hooks = await GoalPlugin({ client } as any)
-    await expect(hooks["command.execute.before"]?.({ command: "goal", sessionID: "clear-session", arguments: "temporary goal" }, { parts: [] })).rejects.toThrow(
-      "__GOAL_HANDLED__",
-    )
-    await expect(hooks["command.execute.before"]?.({ command: "goal", sessionID: "clear-session", arguments: "clear" }, { parts: [] })).rejects.toThrow("__GOAL_HANDLED__")
+    await expectCommandHandled(hooks["command.execute.before"]?.({ command: "goal", sessionID: "clear-session", arguments: "temporary goal" }, { parts: [] }))
+    await expectCommandHandled(hooks["command.execute.before"]?.({ command: "goal", sessionID: "clear-session", arguments: "clear" }, { parts: [] }))
 
     expect(JSON.parse(await readFile(stateFile, "utf8"))["clear-session"]).toBeUndefined()
     expect(toasts.at(-1)?.message).toContain("Goal cleared")
@@ -347,13 +340,9 @@ describe("goal plugin e2e harness", () => {
     }
 
     const hooks = await GoalPlugin({ client } as any)
-    await expect(hooks["command.execute.before"]?.({ command: "goal", sessionID: "session-stats", arguments: "replace the words" }, { parts: [] })).rejects.toThrow(
-      "__GOAL_HANDLED__",
-    )
+    await expectCommandHandled(hooks["command.execute.before"]?.({ command: "goal", sessionID: "session-stats", arguments: "replace the words" }, { parts: [] }))
     const updated = JSON.parse(await readFile(stateFile, "utf8"))["session-stats"]
-    await expect(hooks["command.execute.before"]?.({ command: "goal", sessionID: "session-stats", arguments: "append and keep more context" }, { parts: [] })).rejects.toThrow(
-      "__GOAL_HANDLED__",
-    )
+    await expectCommandHandled(hooks["command.execute.before"]?.({ command: "goal", sessionID: "session-stats", arguments: "append and keep more context" }, { parts: [] }))
 
     const saved = JSON.parse(await readFile(stateFile, "utf8"))["session-stats"]
     expect(saved).toMatchObject({ objective: "replace the words\nand keep more context", status: "active", createdAt: 1_000 })
@@ -406,13 +395,9 @@ describe("goal plugin e2e harness", () => {
     }
 
     const hooks = await GoalPlugin({ client } as any)
-    await expect(hooks["command.execute.before"]?.({ command: "goal", sessionID: "session-set", arguments: "new work" }, { parts: [] })).rejects.toThrow("__GOAL_HANDLED__")
-    await expect(hooks["command.execute.before"]?.({ command: "goal", sessionID: "session-append", arguments: "append more work" }, { parts: [] })).rejects.toThrow(
-      "__GOAL_HANDLED__",
-    )
-    await expect(hooks["command.execute.before"]?.({ command: "goal", sessionID: "session-resume", arguments: "resume" }, { parts: [] })).rejects.toThrow(
-      "__GOAL_HANDLED__",
-    )
+    await expectCommandHandled(hooks["command.execute.before"]?.({ command: "goal", sessionID: "session-set", arguments: "new work" }, { parts: [] }))
+    await expectCommandHandled(hooks["command.execute.before"]?.({ command: "goal", sessionID: "session-append", arguments: "append more work" }, { parts: [] }))
+    await expectCommandHandled(hooks["command.execute.before"]?.({ command: "goal", sessionID: "session-resume", arguments: "resume" }, { parts: [] }))
 
     const saved = JSON.parse(await readFile(stateFile, "utf8"))
     expect(saved["session-set"]).toMatchObject({ objective: "new work", status: "active", createdAt: 1_000, timeUsedSeconds: 45 })
