@@ -2,7 +2,7 @@ import { createHash } from "node:crypto"
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
-import { tool, type Plugin } from "@opencode-ai/plugin"
+import { tool, type Plugin, type ToolDefinition } from "@opencode-ai/plugin"
 import type { Message, Part, TextPart } from "@opencode-ai/sdk"
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse"
 import { NO_GOAL, accounted, commandHints, formatElapsed, formatGoalSummary, parseGoalCommand, renderContinuationPrompt, type ContinuationMode, type GoalCommand, type GoalState } from "./core"
@@ -249,7 +249,24 @@ export const GoalPlugin: Plugin = async ({ client, directory, worktree }) => {
   }
 
   const getGoal = (sessionID: string) => goals.get(sessionID)
-  const putGoal = (sessionID: string, goal: GoalState | null) => (goal ? goals.set(sessionID, goal) : goals.delete(sessionID))
+  const hasActiveGoals = () => {
+    for (const goal of goals.values()) {
+      if (goal.status === "active") return true
+    }
+    return false
+  }
+  const tools: Record<string, ToolDefinition> = {}
+  let updateGoalTool: ToolDefinition | null = null
+  const syncTools = () => {
+    if (!updateGoalTool) return
+    if (hasActiveGoals()) tools.update_goal = updateGoalTool
+    else delete tools.update_goal
+  }
+  const setGoal = (sessionID: string, goal: GoalState | null) => {
+    if (goal) goals.set(sessionID, goal)
+    else goals.delete(sessionID)
+    syncTools()
+  }
   const rememberInfo = (sessionID: string, patch: PromptInfoUpdate) => {
     if (!Object.keys(patch).length) return
 
@@ -312,7 +329,7 @@ export const GoalPlugin: Plugin = async ({ client, directory, worktree }) => {
       updatedAt: now,
     })
     const save = async (message: string, nextGoal: GoalState | null, continuation: ContinuationEffect): Promise<Result> => {
-      putGoal(sessionID, nextGoal)
+      setGoal(sessionID, nextGoal)
       await persistGoals()
       return nextGoal ? { ok: true, message, goal: nextGoal, continuation } : { ok: true, message, continuation }
     }
@@ -393,7 +410,7 @@ export const GoalPlugin: Plugin = async ({ client, directory, worktree }) => {
 
     const goal = getGoal(sessionID)
     if (!goal || goal.status !== "active") return
-    putGoal(sessionID, accounted(goal, now))
+    setGoal(sessionID, accounted(goal, now))
     await persistGoals()
 
     const info = (await latest(sessionID)) ?? rememberedInfo.get(sessionID)
@@ -467,27 +484,28 @@ export const GoalPlugin: Plugin = async ({ client, directory, worktree }) => {
     inFlight.delete(continuation.sessionID)
   }
 
+  updateGoalTool = tool({
+    description: "Mark the active /goal objective complete after verifying every requirement is satisfied.",
+    args: {
+      status: z.literal("complete"),
+    },
+    execute: async (_args, context) => {
+      const result = await mutate(context.sessionID, { kind: "complete" })
+      await applyContinuationEffect(context.sessionID, result.continuation)
+
+      if (!result.ok || !result.goal) return result.message
+      return `${result.message}. Final elapsed time: ${formatElapsed(result.goal.timeUsedSeconds)}. ${commandHints(result.goal.status)}`
+    },
+  })
+  syncTools()
+
   return {
     config: async (cfg) => {
       cfg.command ??= {}
       cfg.command.goal = { template: "", description: "set or view the goal for a long-running task" }
     },
 
-    tool: {
-      update_goal: tool({
-        description: "Mark the active /goal objective complete after verifying every requirement is satisfied.",
-        args: {
-          status: z.literal("complete"),
-        },
-        execute: async (_args, context) => {
-          const result = await mutate(context.sessionID, { kind: "complete" })
-          await applyContinuationEffect(context.sessionID, result.continuation)
-
-          if (!result.ok || !result.goal) return result.message
-          return `${result.message}. Final elapsed time: ${formatElapsed(result.goal.timeUsedSeconds)}. ${commandHints(result.goal.status)}`
-        },
-      }),
-    },
+    tool: tools,
 
     event: async ({ event }) => {
       const eventRecord = event as { type?: string; properties?: unknown; data?: unknown }

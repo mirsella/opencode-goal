@@ -312,6 +312,31 @@ describe("goal plugin e2e harness", () => {
     expect(toasts.at(-1)?.message).toContain("No goal is currently set")
   })
 
+  test("registers update_goal only while at least one goal is active", async () => {
+    const client = {
+      tui: { showToast: async () => undefined },
+      session: {
+        messages: async () => [],
+        prompt: async () => undefined,
+      },
+    }
+
+    const hooks = await GoalPlugin({ client } as any)
+    expect(hooks.tool?.update_goal).toBeUndefined()
+
+    await expectCommandHandled(hooks["command.execute.before"]?.({ command: "goal", sessionID: "tool-toggle", arguments: "ship feature" }, { parts: [] }))
+    expect(hooks.tool?.update_goal).toBeDefined()
+
+    await expectCommandHandled(hooks["command.execute.before"]?.({ command: "goal", sessionID: "tool-toggle", arguments: "pause" }, { parts: [] }))
+    expect(hooks.tool?.update_goal).toBeUndefined()
+
+    await expectCommandHandled(hooks["command.execute.before"]?.({ command: "goal", sessionID: "tool-toggle", arguments: "resume" }, { parts: [] }))
+    expect(hooks.tool?.update_goal).toBeDefined()
+
+    await expectCommandHandled(hooks["command.execute.before"]?.({ command: "goal", sessionID: "tool-toggle", arguments: "clear" }, { parts: [] }))
+    expect(hooks.tool?.update_goal).toBeUndefined()
+  })
+
   test("updates and appends goals without resetting stats", async () => {
     const prompts: any[] = []
     const toasts: any[] = []

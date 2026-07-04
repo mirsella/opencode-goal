@@ -20,7 +20,7 @@ Active goals auto-continue when the session becomes idle. The continuation promp
 
 ## Tool
 
-The plugin exposes `update_goal({ status: "complete" })` so the assistant can stop the loop after it verifies the objective is actually complete.
+The plugin exposes `update_goal({ status: "complete" })` only while at least one active goal exists, so inactive sessions do not carry extra tool context.
 
 ## State
 
