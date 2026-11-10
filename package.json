@@ -37,7 +37,7 @@
   "dependencies": {
     "@opencode-ai/plugin": "1.14.37",
     "@opencode-ai/sdk": "1.14.37",
-    "effect": "4.0.0-beta.59"
+    "effect": "4.0.0-beta.103"
   },
   "overrides": {
     "uuid": "14.0.0"
